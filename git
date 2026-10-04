@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# Dispatch to Windows git.exe for repos on the Windows drives (/mnt/c, /mnt/d),
+# and to WSL's /usr/bin/git everywhere else. Lives on PATH so it also applies
+# to scripts, editors, and other non-interactive callers.
+#
+# The repository is located the way git locates it: -C, --git-dir, --work-tree
+# (and GIT_DIR / GIT_WORK_TREE) are honoured, and for `clone`, `init`,
+# `worktree add` and `submodule add` the destination directory decides.
+# Arguments are parsed with git's own rules (option/argument forms,
+# short-option clusters, long-option abbreviations).
+
+WSL_GIT=/usr/bin/git
+WIN_GIT="/mnt/c/Program Files/Git/cmd/git.exe"
+WIN_DRIVES=cd   # drive letters under /mnt whose repos use git.exe
+
+is_win_path() { [[ $1 =~ ^/mnt/[$WIN_DRIVES](/|$) ]]; }
+
+# abspath <path> <base>: absolute, normalised path (symlinks resolved like git does)
+abspath() {
+  local p=$1
+  [[ $p == /* ]] || p=$2/$p
+  realpath -m -- "$p"
+}
+
+# match_long <name> <option>...: print the option <name> refers to, allowing
+# unambiguous abbreviations (an exact match always wins), as parse-options does
+match_long() {
+  local name=$1 opt hit=
+  shift
+  for opt; do
+    [[ $opt == "$name" ]] && { printf '%s' "$opt"; return; }
+    if [[ $opt == "$name"* ]]; then
+      [[ -n $hit ]] && return 1   # ambiguous; git itself will report the error
+      hit=$opt
+    fi
+  done
+  [[ -n $hit ]] && printf '%s' "$hit"
+}
+
+args=("$@")
+n=${#args[@]}
+cwd=$(pwd -P)
+git_dir=${GIT_DIR-}
+work_tree=${GIT_WORK_TREE-}
+declare -A path_arg   # arg index -> absolute path it names
+
+# --- Global options, as accepted by git.c handle_options() ---
+i=0
+while (( i < n )); do
+  a=${args[i]}
+  case $a in
+    -C)
+      if [[ -n ${args[i+1]} ]]; then
+        cwd=$(abspath "${args[i+1]}" "$cwd")
+        path_arg[$((i+1))]=$cwd
+      fi
+      (( i += 2 )) ;;
+    --git-dir)        git_dir=${args[i+1]};   gd_idx=$((i+1)); (( i += 2 )) ;;
+    --git-dir=*)      git_dir=${a#*=};        gd_idx=;         (( i += 1 )) ;;
+    --work-tree)      work_tree=${args[i+1]}; wt_idx=$((i+1)); (( i += 2 )) ;;
+    --work-tree=*)    work_tree=${a#*=};      wt_idx=;         (( i += 1 )) ;;
+    -c|--namespace|--config-env|--attr-source) (( i += 2 )) ;;
+    -*)               (( i += 1 )) ;;
+    *)                break ;;
+  esac
+done
+cmd_idx=$i
+cmd=${args[i]}
+
+# Relative --git-dir / --work-tree resolve against the directory after all -C's
+target=$cwd
+if [[ -n $work_tree ]]; then
+  target=$(abspath "$work_tree" "$cwd")
+  [[ -n $wt_idx ]] && path_arg[$wt_idx]=$target
+fi
+if [[ -n $git_dir ]]; then
+  target=$(abspath "$git_dir" "$cwd")
+  [[ -n $gd_idx ]] && path_arg[$gd_idx]=$target
+fi
+
+# --- Commands that create a repository or checkout: the destination decides ---
+
+# parse_options_dest <first-arg-index> <positional-number>: set dest_idx to the
+# index of the given positional argument, using parse-options rules (options
+# may follow positionals; -- and --end-of-options end option parsing).
+# Reads long_opts, long_with_arg and short_with_arg.
+parse_options_dest() {
+  local i a k name opt end_of_opts= positionals=()
+  for (( i = $1; i < n; i++ )); do
+    a=${args[i]}
+    if [[ -n $end_of_opts || $a == - || $a != -* ]]; then
+      positionals+=("$i")
+    elif [[ $a == -- || $a == --end-of-options ]]; then
+      end_of_opts=1
+    elif [[ $a == --* ]]; then
+      name=${a#--}
+      [[ $name == *=* || $name == no-* ]] && continue   # value attached, or negated
+      opt=$(match_long "$name" "${long_opts[@]}") || continue
+      [[ $long_with_arg == *" $opt "* ]] && (( i++ ))
+    else
+      # Short-option cluster such as -qb main or -j4
+      for (( k = 1; k < ${#a}; k++ )); do
+        if [[ $short_with_arg == *"${a:k:1}"* ]]; then
+          (( k == ${#a} - 1 )) && (( i++ ))   # value is the next argument
+          break
+        fi
+      done
+    fi
+  done
+  dest_idx=${positionals[$2]}
+}
+
+# submodule_add_dest <first-arg-index>: same, for `git submodule add`, which
+# is a shell script with its own stricter rules (exact option names, no
+# clusters, options must come before <repository>)
+submodule_add_dest() {
+  local i=$1
+  while (( i < n )); do
+    case ${args[i]} in
+      -b|--branch|--reference|--name|--depth) (( i += 2 )) ;;
+      --) (( i += 1 )); break ;;
+      -*) (( i += 1 )) ;;
+      *)  break ;;
+    esac
+  done
+  (( i + 1 < n )) && dest_idx=$(( i + 1 ))   # <repository> [<path>]
+}
+
+dest_idx=
+case $cmd in
+  clone)   # git clone <repository> [<directory>]
+    long_opts=(verbose quiet progress reject-shallow no-checkout checkout bare
+      mirror local no-hardlinks hardlinks shared recurse-submodules recursive
+      jobs template reference reference-if-able dissociate origin branch
+      upload-pack depth shallow-since shallow-exclude single-branch no-tags
+      tags shallow-submodules separate-git-dir ref-format config server-option
+      ipv4 ipv6 filter also-filter-submodules remote-submodules sparse
+      bundle-uri revision)
+    long_with_arg=" jobs template reference reference-if-able origin branch
+      upload-pack depth shallow-since shallow-exclude separate-git-dir
+      ref-format config server-option filter bundle-uri revision "
+    short_with_arg=jobuc
+    parse_options_dest $((cmd_idx + 1)) 1 ;;
+  init)    # git init [<directory>]
+    long_opts=(template bare shared quiet separate-git-dir initial-branch
+      object-format ref-format)
+    long_with_arg=" template separate-git-dir initial-branch object-format ref-format "
+    short_with_arg=b
+    parse_options_dest $((cmd_idx + 1)) 0 ;;
+  worktree)   # git worktree add <path> [<commit-ish>]
+    if [[ ${args[cmd_idx+1]} == add ]]; then
+      long_opts=(force orphan detach checkout lock reason quiet track
+        guess-remote relative-paths)
+      long_with_arg=" reason "
+      short_with_arg=bB
+      parse_options_dest $((cmd_idx + 2)) 0
+    fi ;;
+  submodule)  # git submodule [--quiet] add <repository> [<path>]
+    for (( i = cmd_idx + 1; i < n; i++ )); do
+      case ${args[i]} in
+        -q|--quiet|--cached) ;;
+        add) submodule_add_dest $((i + 1)); break ;;
+        *)   break ;;
+      esac
+    done ;;
+esac
+
+if [[ -n $dest_idx ]]; then
+  dest=$(abspath "${args[dest_idx]}" "$cwd")
+  path_arg[$dest_idx]=$dest
+  # A worktree or submodule on the other side from its repository records
+  # paths that only one of the two gits can follow
+  is_win_path "$target"; repo_side=$?
+  is_win_path "$dest"; dest_side=$?
+  if [[ $cmd == worktree || $cmd == submodule ]] && (( repo_side != dest_side )); then
+    echo "git: warning: '$dest' is on a different side of WSL/Windows than the repository at '$target'; only one of WSL git and git.exe will be able to use it" >&2
+  fi
+  target=$dest
+fi
+
+if ! is_win_path "$target"; then
+  exec "$WSL_GIT" "$@"
+fi
+
+# --- Running git.exe: translate paths it can't understand ---
+for (( i = 0; i < n; i++ )); do
+  a=${args[i]}
+  if [[ -n ${path_arg[$i]} ]]; then
+    # Path options are made absolute so they don't depend on a Linux cwd
+    args[i]=$(wslpath -w "${path_arg[$i]}")
+  elif is_win_path "$a"; then
+    args[i]=$(wslpath -w "$a")
+  elif [[ $a =~ ^([^/=]*=)(/.*)$ ]]; then
+    # --option=/mnt/c/... and key=/mnt/c/... (for -c)
+    key=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+    is_win_path "$val" && args[i]=$key$(wslpath -w "$val")
+  fi
+done
+
+# Forward GIT_* environment variables (Windows processes don't inherit them
+# otherwise), translating paths. Linux commands such as GIT_EDITOR can't run
+# from git.exe, so they are left out.
+for v in "${!GIT_@}"; do
+  case $v in
+    GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY|GIT_COMMON_DIR|\
+    GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_TEMPLATE_DIR)
+      WSLENV+=":$v/p" ;;
+    GIT_CEILING_DIRECTORIES|GIT_ALTERNATE_OBJECT_DIRECTORIES)
+      WSLENV+=":$v/l" ;;
+    GIT_EXEC_PATH|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PAGER|GIT_ASKPASS|\
+    GIT_SSH|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF|GIT_PROXY_COMMAND)
+      ;;
+    *) WSLENV+=":$v" ;;
+  esac
+done
+export WSLENV=${WSLENV#:}
+
+exec "$WIN_GIT" "${args[@]}"
