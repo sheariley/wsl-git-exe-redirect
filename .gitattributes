@@ -1,0 +1,6 @@
+# Always use LF line endings, overriding core.autocrlf. The `git` script runs
+# under bash in WSL, which fails on CRLF (`/usr/bin/env: 'bash\r'`).
+* text=auto eol=lf
+
+# The wrapper script has no extension, so mark it as text explicitly
+git text eol=lf

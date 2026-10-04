@@ -8,6 +8,10 @@
 # `worktree add` and `submodule add` the destination directory decides.
 # Arguments are parsed with git's own rules (option/argument forms,
 # short-option clusters, long-option abbreviations).
+#
+# https://github.com/sheariley/wsl-git-exe-redirect
+# Copyright (c) 2026 Shea Riley. MIT License; see the LICENSE file or
+# https://opensource.org/licenses/MIT
 
 WSL_GIT=/usr/bin/git
 WIN_GIT="/mnt/c/Program Files/Git/cmd/git.exe"
