@@ -7,7 +7,8 @@
 # (and GIT_DIR / GIT_WORK_TREE) are honoured, and for `clone`, `init`,
 # `worktree add` and `submodule add` the destination directory decides.
 # Arguments are parsed with git's own rules (option/argument forms,
-# short-option clusters, long-option abbreviations).
+# short-option clusters, long-option abbreviations). Paths in the output of
+# `rev-parse` and `worktree list --porcelain` come back as WSL paths.
 #
 # https://github.com/sheariley/wsl-git-exe-redirect
 # Copyright (c) 2026 Shea Riley. MIT License; see the LICENSE file or
@@ -219,4 +220,47 @@ for v in "${!GIT_@}"; do
 done
 export WSLENV=${WSLENV#:}
 
-exec "$WIN_GIT" "${args[@]}"
+# --- git.exe's output: Windows paths back to WSL paths ---
+# git.exe prints the paths it reports as Windows paths (C:/src/app), which Linux
+# callers can't use, as in cd "$(git rev-parse --show-toplevel)". For the
+# commands whose output is paths, lines that are Windows absolute paths are
+# converted with wslpath -u; anything else passes through unchanged.
+output=
+case $cmd in
+  rev-parse) output=lines ;;
+  worktree)  # git worktree list --porcelain: "worktree <path>" lines (not -z)
+    if [[ ${args[cmd_idx+1]} == list ]]; then
+      porcelain= nul=
+      for (( i = cmd_idx + 2; i < n; i++ )); do
+        case ${args[i]} in
+          --porcelain) porcelain=1 ;;
+          -z) nul=1 ;;
+        esac
+      done
+      [[ -n $porcelain && -z $nul ]] && output=worktree-lines
+    fi ;;
+esac
+
+[[ -z $output ]] && exec "$WIN_GIT" "${args[@]}"
+
+# to_wsl_path <text>: print it, converted with wslpath -u if it is a Windows
+# absolute path (C:/a, C:\a, \\wsl.localhost\<distro>\a)
+win_abs='^([A-Za-z]:[/\\]|[/\\][/\\][^/\\])'
+to_wsl_path() {
+  if [[ $1 =~ $win_abs ]] && wslpath -u "$1" 2>/dev/null; then
+    return
+  fi
+  printf '%s\n' "$1"
+}
+
+"$WIN_GIT" "${args[@]}" | while IFS= read -r line || [[ -n $line ]]; do
+  line=${line%$'\r'}
+  if [[ $output == worktree-lines && $line == "worktree "* ]]; then
+    printf 'worktree %s\n' "$(to_wsl_path "${line#worktree }")"
+  elif [[ $output == lines ]]; then
+    to_wsl_path "$line"
+  else
+    printf '%s\n' "$line"
+  fi
+done
+exit "${PIPESTATUS[0]}"

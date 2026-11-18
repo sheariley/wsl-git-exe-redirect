@@ -167,6 +167,18 @@ script instead: full option names only, and options must come before
   start from a Linux directory. A path outside the Windows drives becomes
   `\\wsl.localhost\<distro>\…`.
 
+`git.exe` also reports paths as Windows paths, which Linux callers can't use
+(`cd "$(git rev-parse --show-toplevel)"`, shell prompts). For the commands
+whose output is paths, the wrapper converts them back with `wslpath -u`:
+
+- `git rev-parse`: every output line that is a Windows absolute path
+  (`C:/src/app` → `/mnt/c/src/app`); relative paths such as `--show-prefix`
+  and anything that isn't a path (`rev-parse HEAD`) pass through unchanged
+- `git worktree list --porcelain`: the `worktree <path>` lines
+
+The exit status of `git.exe` is kept. All other commands run `git.exe`
+directly, with its output untouched.
+
 ## Limitations
 
 - **Pathspecs don't choose the git.** `git status /mnt/c/src/app/file.txt`
@@ -187,6 +199,14 @@ script instead: full option names only, and options must come before
   the destination directory could be misread.
 - **Only `git` invocations are covered.** Programs that call `/usr/bin/git`
   by full path, or bundle their own git, bypass the wrapper.
+- **Only path-reporting commands get their output converted.** Paths that
+  appear in the output of other commands (for example `git worktree list`
+  without `--porcelain`, or with `-z`) stay Windows paths.
+
+## Tests
+
+`bash tests/output-paths.sh` checks the output conversion against a scratch
+repository under `/mnt/c/Users/Public` (WSL with Git for Windows needed).
 
 ## Uninstall
 
