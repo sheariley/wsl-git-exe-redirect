@@ -7,7 +7,9 @@
 # (and GIT_DIR / GIT_WORK_TREE) are honoured, and for `clone`, `init`,
 # `worktree add` and `submodule add` the destination directory decides.
 # Arguments are parsed with git's own rules (option/argument forms,
-# short-option clusters, long-option abbreviations).
+# short-option clusters, long-option abbreviations). Repositories that `clone`
+# and `init` create on the Windows drives record core.autocrlf=false, so their
+# work trees keep the line endings WSL git would check out.
 #
 # https://github.com/sheariley/wsl-git-exe-redirect
 # Copyright (c) 2026 Shea Riley. MIT License; see the LICENSE file or
@@ -16,6 +18,10 @@
 WSL_GIT=/usr/bin/git
 WIN_GIT="/mnt/c/Program Files/Git/cmd/git.exe"
 WIN_DRIVES=cd   # drive letters under /mnt whose repos use git.exe
+# core.autocrlf recorded in repositories that `clone` and `init` create on the
+# Windows drives: false keeps the line endings WSL git would check out; empty
+# leaves git.exe's own setting (Git for Windows: true, CRLF in the work tree)
+NEW_REPO_AUTOCRLF=${WSL_GIT_NEW_REPO_AUTOCRLF-false}
 
 is_win_path() { [[ $1 =~ ^/mnt/[$WIN_DRIVES](/|$) ]]; }
 
@@ -218,5 +224,22 @@ for v in "${!GIT_@}"; do
   esac
 done
 export WSLENV=${WSLENV#:}
+
+# --- Repositories created from WSL keep WSL's line endings ---
+# git.exe applies Git for Windows' core.autocrlf (true by default), so a clone
+# made from WSL would get CRLF work-tree files, and its shell scripts would fail
+# in WSL. A new repository on a Windows drive records NEW_REPO_AUTOCRLF in its
+# own config instead, which both gits then follow (a per-command -c would make
+# them disagree about the same work tree). Left alone when the command sets
+# core.autocrlf itself, and for an existing repository (git init again).
+if [[ -n $NEW_REPO_AUTOCRLF && ( $cmd == clone || $cmd == init ) && " ${args[*]} " != *core.autocrlf* ]]; then
+  if [[ $cmd == clone ]]; then
+    args=("${args[@]:0:cmd_idx+1}" --config "core.autocrlf=$NEW_REPO_AUTOCRLF" "${args[@]:cmd_idx+1}")
+  elif [[ ! -e $target/.git && ! -e $target/HEAD ]]; then
+    "$WIN_GIT" "${args[@]}" || exit
+    "$WIN_GIT" -C "$(wslpath -w "$target")" config core.autocrlf "$NEW_REPO_AUTOCRLF"
+    exit
+  fi
+fi
 
 exec "$WIN_GIT" "${args[@]}"

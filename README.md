@@ -97,8 +97,27 @@ All settings are variables at the top of the script.
 | `WSL_GIT`    | `/usr/bin/git`                         | The Linux git binary. Must be a full path, not `git`, or the wrapper would call itself. |
 | `WIN_GIT`    | `/mnt/c/Program Files/Git/cmd/git.exe` | The Windows git binary, as a WSL path. Change it if Git for Windows is installed elsewhere (e.g. Scoop: `/mnt/c/Users/<you>/scoop/shims/git.exe`). |
 | `WIN_DRIVES` | `cd`                                   | Lower-case drive letters whose repositories use `git.exe`. For example, `cde` adds `/mnt/e`. |
+| `NEW_REPO_AUTOCRLF` | `false`, or `$WSL_GIT_NEW_REPO_AUTOCRLF` if set | The `core.autocrlf` recorded in repositories that `clone` and `init` create on the Windows drives (see below). Empty leaves `git.exe`'s own setting. |
 
 Run `wslpath -u 'C:\path\to\git.exe'` to convert a Windows path for `WIN_GIT`.
+
+### Line endings of new repositories
+
+Git for Windows sets `core.autocrlf=true` by default, so `git.exe` checks out
+CRLF line endings. A repository cloned from WSL would get CRLF files where WSL
+git gave LF, and its shell scripts would then fail in WSL
+(`/usr/bin/env: 'bash\r'`). So a `clone` or `init` on a Windows drive records
+`core.autocrlf=false` in the new repository's own config (`clone --config`,
+`git config` after `init`). Both gits follow that setting afterward, which a
+per-command `-c` would not achieve: Windows tools would then check files out
+with CRLF and WSL with LF.
+
+The wrapper leaves this alone when the command sets `core.autocrlf` itself,
+when `git init` runs in an existing repository, and when
+`WSL_GIT_NEW_REPO_AUTOCRLF` is set to an empty value; `input` or `true` there
+choose another setting. Existing repositories, submodules and repositories
+created from Windows are not changed. `bash tests/new-repo-line-endings.sh`
+checks this against scratch repositories under `/mnt/c/Users/Public`.
 
 If your distro mounts drives somewhere other than `/mnt` (the `root` setting in
 `/etc/wsl.conf`), change `/mnt/` in `is_win_path()` to match.
